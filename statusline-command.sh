@@ -119,11 +119,12 @@ fi
 # -- Token detail --
 tok_content=""
 if [ "$used_tokens" -gt 0 ]; then
-  in_k=$(awk  "BEGIN {printf \"%.1f\", $cur_input/1000}")
-  cr_k=$(awk  "BEGIN {printf \"%.1f\", $cur_cache_read/1000}")
-  cw_k=$(awk  "BEGIN {printf \"%.1f\", $cur_cache_create/1000}")
-  out_k=$(awk "BEGIN {printf \"%.1f\", $cur_output/1000}")
-  tok_content="\033[38;5;242m${ICO_IN} in:\033[38;5;111m${in_k}k \033[38;5;242m${ICO_CR} cr:\033[38;5;114m${cr_k}k \033[38;5;242m${ICO_CW} cw:\033[38;5;221m${cw_k}k \033[38;5;242m${ICO_OUT} out:\033[38;5;218m${out_k}k"
+  # Format helper: show full number if < 100, otherwise show in k
+  if [ "$cur_input" -lt 100 ]; then in_fmt="${cur_input}"; else in_fmt="$(awk "BEGIN {printf \"%.1f\", $cur_input/1000}")k"; fi
+  if [ "$cur_cache_read" -lt 100 ]; then cr_fmt="${cur_cache_read}"; else cr_fmt="$(awk "BEGIN {printf \"%.1f\", $cur_cache_read/1000}")k"; fi
+  if [ "$cur_cache_create" -lt 100 ]; then cw_fmt="${cur_cache_create}"; else cw_fmt="$(awk "BEGIN {printf \"%.1f\", $cur_cache_create/1000}")k"; fi
+  if [ "$cur_output" -lt 100 ]; then out_fmt="${cur_output}"; else out_fmt="$(awk "BEGIN {printf \"%.1f\", $cur_output/1000}")k"; fi
+  tok_content="\033[38;5;242m${ICO_IN} in:\033[38;5;111m${in_fmt} \033[38;5;242m${ICO_CR} cr:\033[38;5;114m${cr_fmt} \033[38;5;242m${ICO_CW} cw:\033[38;5;221m${cw_fmt} \033[38;5;242m${ICO_OUT} out:\033[38;5;218m${out_fmt}"
 fi
 
 # -- Session total --
