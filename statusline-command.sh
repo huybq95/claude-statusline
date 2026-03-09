@@ -119,12 +119,11 @@ fi
 # -- Token detail --
 tok_content=""
 if [ "$used_tokens" -gt 0 ]; then
-  # Format helper: show full number if < 100, otherwise show in k
-  if [ "$cur_input" -lt 100 ]; then in_fmt="${cur_input}"; else in_fmt="$(awk "BEGIN {printf \"%.1f\", $cur_input/1000}")k"; fi
-  if [ "$cur_cache_read" -lt 100 ]; then cr_fmt="${cur_cache_read}"; else cr_fmt="$(awk "BEGIN {printf \"%.1f\", $cur_cache_read/1000}")k"; fi
-  if [ "$cur_cache_create" -lt 100 ]; then cw_fmt="${cur_cache_create}"; else cw_fmt="$(awk "BEGIN {printf \"%.1f\", $cur_cache_create/1000}")k"; fi
-  if [ "$cur_output" -lt 100 ]; then out_fmt="${cur_output}"; else out_fmt="$(awk "BEGIN {printf \"%.1f\", $cur_output/1000}")k"; fi
-  tok_content="\033[38;5;242m${ICO_IN} in:\033[38;5;111m${in_fmt} \033[38;5;242m${ICO_CR} cr:\033[38;5;114m${cr_fmt} \033[38;5;242m${ICO_CW} cw:\033[38;5;221m${cw_fmt} \033[38;5;242m${ICO_OUT} out:\033[38;5;218m${out_fmt}"
+  in_k=$(awk  "BEGIN {printf \"%.1f\", $cur_input/1000}")
+  cr_k=$(awk  "BEGIN {printf \"%.1f\", $cur_cache_read/1000}")
+  cw_k=$(awk  "BEGIN {printf \"%.1f\", $cur_cache_create/1000}")
+  out_k=$(awk "BEGIN {printf \"%.1f\", $cur_output/1000}")
+  tok_content="\033[38;5;242m${ICO_IN} in:\033[38;5;111m${in_k}k \033[38;5;242m${ICO_CR} cr:\033[38;5;114m${cr_k}k \033[38;5;242m${ICO_CW} cw:\033[38;5;221m${cw_k}k \033[38;5;242m${ICO_OUT} out:\033[38;5;218m${out_k}k"
 fi
 
 # -- Session total --
@@ -196,69 +195,93 @@ format_reset_in() {
   fi
 }
 
-# === API Usage Helper ===
-get_api_usage() {
-  CACHE_FILE="$HOME/.cache/ccstatusline-api-usage.json"
-  LOCK_FILE="$HOME/.cache/ccstatusline-api-usage.lock"
-  CACHE_TTL=180  # 3 minutes
-  RATE_LIMIT=30  # 30 seconds between API calls
+# === API Cache Paths ===
+_API_CACHE_DIR="$HOME/.cache/ccstatusline"
+_API_CACHE_FILE="$_API_CACHE_DIR/api-usage.json"
+_API_LOCK_FILE="$_API_CACHE_DIR/api-refresh.lock"
+API_ERROR_FILE="$_API_CACHE_DIR/api-error.txt"
+_API_CACHE_TTL=180  # seconds; serve stale + background-refresh beyond this
 
-  # Check if cache file exists and is fresh
-  if [ -f "$CACHE_FILE" ]; then
-    cache_age=$(($(date +%s) - $(stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0)))
-    if [ "$cache_age" -lt "$CACHE_TTL" ]; then
-      cat "$CACHE_FILE"
-      return 0
-    fi
-  fi
-
-  # Rate limiting: check lock file
-  if [ -f "$LOCK_FILE" ]; then
-    lock_age=$(($(date +%s) - $(stat -f %m "$LOCK_FILE" 2>/dev/null || echo 0)))
-    if [ "$lock_age" -lt "$RATE_LIMIT" ]; then
-      # Return stale cache or empty if rate limited
-      [ -f "$CACHE_FILE" ] && cat "$CACHE_FILE"
-      return 0
-    fi
-  fi
-
-  # Extract OAuth token
+# Fetch from API and atomically update cache. Writes error to API_ERROR_FILE on failure.
+_api_fetch() {
   TOKEN=""
   if [ "$(uname)" = "Darwin" ]; then
-    # macOS: try Keychain first
-    TOKEN=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | grep -o '"claudeAiOauth":{"accessToken":"[^"]*"' | sed 's/.*"accessToken":"\([^"]*\)".*/\1/' || echo "")
+    TOKEN=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null \
+      | grep -o '"claudeAiOauth":{"accessToken":"[^"]*"' \
+      | sed 's/.*"accessToken":"\([^"]*\)".*/\1/' 2>/dev/null || true)
   fi
   if [ -z "$TOKEN" ] && [ -f "$HOME/.claude/.credentials.json" ]; then
-    # Fallback: read from credentials file
     TOKEN=$(jq -r '.claudeAiOauth.accessToken // empty' "$HOME/.claude/.credentials.json" 2>/dev/null)
   fi
-
   if [ -z "$TOKEN" ]; then
-    # No token available
+    echo "no_token: No OAuth token found" > "$API_ERROR_FILE"
     return 1
   fi
 
-  # Create lock file
-  mkdir -p "$(dirname "$LOCK_FILE")"
-  touch "$LOCK_FILE"
-
-  # Call API
-  response=$(curl -s -m 5 \
+  response=$(curl -s -m 10 \
     -H "Authorization: Bearer $TOKEN" \
     -H "anthropic-beta: oauth-2025-04-20" \
     "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
+  curl_exit=$?
 
-  if [ $? -eq 0 ] && [ -n "$response" ]; then
-    # Cache successful response
-    mkdir -p "$(dirname "$CACHE_FILE")"
-    echo "$response" > "$CACHE_FILE"
-    echo "$response"
-    return 0
-  else
-    # Return stale cache on API failure
-    [ -f "$CACHE_FILE" ] && cat "$CACHE_FILE"
+  if [ "$curl_exit" -ne 0 ]; then
+    echo "network_error: curl failed (exit $curl_exit)" > "$API_ERROR_FILE"
     return 1
   fi
+  if [ -z "$response" ]; then
+    echo "empty_response: API returned empty body" > "$API_ERROR_FILE"
+    return 1
+  fi
+
+  api_err=$(echo "$response" | jq -r 'if .error then "\(.error.type): \(.error.message)" else empty end' 2>/dev/null)
+  if [ -n "$api_err" ]; then
+    echo "$api_err" > "$API_ERROR_FILE"
+    return 1
+  fi
+
+  # Atomic write: temp file + mv prevents partial reads
+  tmp=$(mktemp "$_API_CACHE_DIR/api-usage.XXXXXX.json")
+  echo "$response" > "$tmp"
+  mv -f "$tmp" "$_API_CACHE_FILE"
+  rm -f "$API_ERROR_FILE"
+}
+
+# Acquire lock using PID file. Returns 0 if acquired, 1 if another process holds it.
+_api_try_lock() {
+  if [ -f "$_API_LOCK_FILE" ]; then
+    lock_pid=$(cat "$_API_LOCK_FILE" 2>/dev/null)
+    [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null && return 1
+  fi
+  echo $$ > "$_API_LOCK_FILE"
+}
+
+# === API Usage Helper ===
+get_api_usage() {
+  mkdir -p "$_API_CACHE_DIR"
+
+  if [ -f "$_API_CACHE_FILE" ]; then
+    cache_mtime=$(stat -f %m "$_API_CACHE_FILE" 2>/dev/null || stat -c %Y "$_API_CACHE_FILE" 2>/dev/null || echo 0)
+    cache_age=$(( $(date +%s) - cache_mtime ))
+
+    # Always serve cache immediately (fresh or stale)
+    cat "$_API_CACHE_FILE"
+
+    if [ "$cache_age" -ge "$_API_CACHE_TTL" ]; then
+      # Cache stale — refresh in background, don't block statusline
+      if _api_try_lock; then
+        ( _api_fetch; rm -f "$_API_LOCK_FILE" ) &
+      fi
+    fi
+    return 0
+  fi
+
+  # No cache yet — first run, fetch synchronously
+  if _api_try_lock; then
+    _api_fetch
+    rm -f "$_API_LOCK_FILE"
+    [ -f "$_API_CACHE_FILE" ] && cat "$_API_CACHE_FILE"
+  fi
+  # Lock held by another process — return empty, it will be ready next render
 }
 
 # === Progress Bar Helper ===
@@ -314,18 +337,11 @@ if [ -n "$api_sess_pct" ] || [ -n "$api_week_pct" ]; then
 
   [ -n "$line3" ] && printf '%b\n' "$line3"
 else
-  # Fallback: API data not available — show session context % and cost instead
-  used_pct_val=$(echo "$input" | jq -r '.context_window.used_percentage // empty')
-  remaining_pct_val=$(echo "$input" | jq -r '.context_window.remaining_percentage // empty')
-  fallback_line3=""
-  if [ -n "$used_pct_val" ] && [ -n "$remaining_pct_val" ]; then
-    used_int3=$(printf '%.0f' "$used_pct_val")
-    if [ "$used_int3" -ge 80 ]; then ctx3_c=203; elif [ "$used_int3" -ge 50 ]; then ctx3_c=215; else ctx3_c=114; fi
-    fallback_line3="${fallback_line3} \033[38;5;245mctx: \033[38;5;${ctx3_c}m${used_pct_val}% used\033[38;5;245m / ${remaining_pct_val}% left\033[0m"
+  # Fallback: API data not available — show actual error message
+  if [ -f "$API_ERROR_FILE" ]; then
+    api_err=$(cat "$API_ERROR_FILE")
+    printf '%b\n' " \033[38;5;203m[!] API error: ${api_err}\033[0m"
+  else
+    printf '%b\n' " \033[38;5;203m[!] Cannot get usage data from API\033[0m"
   fi
-  if [ -n "$cost" ] && [ "$cost" != "0" ]; then
-    cost_fmt3=$(awk "BEGIN {printf \"%.4f\", $cost}")
-    fallback_line3="${fallback_line3}   \033[38;5;136m${ICO_COST} session cost: \$${cost_fmt3}\033[0m"
-  fi
-  [ -n "$fallback_line3" ] && printf '%b\n' "$fallback_line3"
 fi
