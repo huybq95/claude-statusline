@@ -42,6 +42,7 @@ ICO_GIT=""
 
 # === Segment background colors (256-color) ===
 BG_DIR=167      # salmon-red
+BG_DIFF=238     # dark gray — diff stat segment, distinct from branch
 # BG_MODEL is chosen dynamically based on model name (see below)
 BG_PATH=24      # steel teal
 BG_CTX=235      # near-black
@@ -90,6 +91,14 @@ if [ -n "$git_branch" ]; then
   if [ -n "$git_dirty" ]; then
     git_dirty_mark=" \033[38;5;215m✗"
   fi
+  diff_label=""
+  git_diff_stat=$(git -C "$cwd" --no-optional-locks diff HEAD --shortstat 2>/dev/null)
+  if [ -n "$git_diff_stat" ]; then
+    diff_ins=$(echo "$git_diff_stat" | grep -o '[0-9]* insertion' | grep -o '[0-9]*')
+    diff_del=$(echo "$git_diff_stat" | grep -o '[0-9]* deletion' | grep -o '[0-9]*')
+    [ -n "$diff_ins" ] && diff_label="${diff_label} \033[38;5;114m+${diff_ins}"
+    [ -n "$diff_del" ] && diff_label="${diff_label} \033[38;5;203m-${diff_del}"
+  fi
   dir_label="\033[1m${git_branch}\033[22m${git_dirty_mark}"
 else
   dir_label="\033[1m${basename_cwd}\033[22m"
@@ -129,13 +138,17 @@ else
 fi
 
 # -- Token detail --
+# Format a token count: show raw integer if < 100, else show Xk
+fmt_tok() {
+  awk "BEGIN {n=$1; if(n<100) printf \"%d\", n; else printf \"%.1fk\", n/1000}"
+}
 tok_content=""
 if [ "$used_tokens" -gt 0 ]; then
-  in_k=$(awk  "BEGIN {printf \"%.1f\", $cur_input/1000}")
-  cr_k=$(awk  "BEGIN {printf \"%.1f\", $cur_cache_read/1000}")
-  cw_k=$(awk  "BEGIN {printf \"%.1f\", $cur_cache_create/1000}")
-  out_k=$(awk "BEGIN {printf \"%.1f\", $cur_output/1000}")
-  tok_content="\033[38;5;242m${ICO_IN} in:\033[38;5;111m${in_k}k \033[38;5;242m${ICO_CR} cr:\033[38;5;114m${cr_k}k \033[38;5;242m${ICO_CW} cw:\033[38;5;221m${cw_k}k \033[38;5;242m${ICO_OUT} out:\033[38;5;218m${out_k}k"
+  in_fmt=$(fmt_tok "$cur_input")
+  cr_fmt=$(fmt_tok "$cur_cache_read")
+  cw_fmt=$(fmt_tok "$cur_cache_create")
+  out_fmt=$(fmt_tok "$cur_output")
+  tok_content="\033[38;5;242m${ICO_IN} in:\033[38;5;111m${in_fmt} \033[38;5;242m${ICO_CR} cr:\033[38;5;114m${cr_fmt} \033[38;5;242m${ICO_CW} cw:\033[38;5;221m${cw_fmt} \033[38;5;242m${ICO_OUT} out:\033[38;5;218m${out_fmt}"
 fi
 
 # -- Session total --
@@ -281,6 +294,7 @@ set --
 set -- "$@" "$BG_MODEL" "$model_content"
 set -- "$@" "$BG_PATH"  "$path_content"
 set -- "$@" "$BG_DIR"   "$dir_content"
+[ -n "$diff_label" ] && set -- "$@" "$BG_DIFF" "${diff_label# }"
 set -- "$@" "$BG_CTX"   "$ctx_content"
 render_pl_line "$@"
 
