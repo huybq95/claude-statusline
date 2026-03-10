@@ -4,6 +4,7 @@ echo "$input" > /tmp/statusline-debug.json
 
 # === Data extraction ===
 model=$(echo "$input" | jq -r '.model.display_name // "Claude"')
+model_id=$(echo "$input" | jq -r '.model.id // ""')
 cwd=$(echo "$input" | jq -r '.workspace.current_dir // .cwd // ""')
 session_name=$(echo "$input" | jq -r '.session_name // empty')
 
@@ -41,12 +42,21 @@ ICO_GIT=""
 
 # === Segment background colors (256-color) ===
 BG_DIR=167      # salmon-red
-BG_MODEL=61     # slate blue / purple
+# BG_MODEL is chosen dynamically based on model name (see below)
 BG_PATH=24      # steel teal
 BG_CTX=235      # near-black
 BG_TOK=234      # very dark
 BG_TOTAL=238    # dark gray
 BG_COST=136     # dark amber/gold
+
+# Dynamic model segment color based on model name
+model_id_lower=$(echo "$model_id" | tr '[:upper:]' '[:lower:]')
+case "$model_id_lower" in
+  *opus*)   BG_MODEL=99  ;;  # violet / purple
+  *sonnet*) BG_MODEL=172 ;;  # warm amber / orange
+  *haiku*)  BG_MODEL=74  ;;  # sky blue
+  *)        BG_MODEL=240 ;;  # neutral grey
+esac
 
 SEP=""  # U+E0B0 powerline arrow
 
@@ -73,16 +83,18 @@ render_pl_line() {
 short_cwd=$(echo "$cwd" | sed "s|^$HOME|~|")
 basename_cwd=$(basename "$cwd")
 git_branch=$(git -C "$cwd" --no-optional-locks symbolic-ref --short HEAD 2>/dev/null)
-git_part=""
+dir_label=""
+git_dirty_mark=""
 if [ -n "$git_branch" ]; then
   git_dirty=$(git -C "$cwd" --no-optional-locks status --porcelain 2>/dev/null)
   if [ -n "$git_dirty" ]; then
-    git_part=" \033[38;5;250m${ICO_GIT}(\033[38;5;117m${git_branch}\033[38;5;250m)\033[38;5;215m ✗"
-  else
-    git_part=" \033[38;5;250m${ICO_GIT}(\033[38;5;117m${git_branch}\033[38;5;250m)"
+    git_dirty_mark=" \033[38;5;215m✗"
   fi
+  dir_label="\033[1m${git_branch}\033[22m${git_dirty_mark}"
+else
+  dir_label="\033[1m${basename_cwd}\033[22m"
 fi
-dir_content="${ICO_DIR} \033[1m${basename_cwd}\033[22m${git_part}"
+dir_content="${ICO_DIR} ${dir_label}"
 
 # -- Model --
 sess_part=""
@@ -141,21 +153,6 @@ if [ -n "$cost" ] && [ "$cost" != "0" ]; then
   cost_content="${ICO_COST} \$${cost_fmt}"
 fi
 
-# === Line 1 ===
-set --
-set -- "$@" "$BG_DIR"   "$dir_content"
-set -- "$@" "$BG_MODEL" "$model_content"
-set -- "$@" "$BG_PATH"  "$path_content"
-set -- "$@" "$BG_CTX"   "$ctx_content"
-render_pl_line "$@"
-
-# === Line 2: token detail + total + cost ===
-line2=""
-[ -n "$tok_content"   ] && line2="${line2} ${tok_content}\033[0m"
-[ -n "$total_content" ] && line2="${line2}  \033[38;5;80m${total_content}\033[0m"
-[ -n "$cost_content"  ] && line2="${line2}   \033[38;5;136m${cost_content}\033[0m"
-[ -n "$line2" ] && printf '%b\n' "$line2"
-
 # === Reset timer helper ===
 format_reset_in() {
   reset_at="$1"; [ -z "$reset_at" ] && return
@@ -195,93 +192,75 @@ format_reset_in() {
   fi
 }
 
-# === API Cache Paths ===
-_API_CACHE_DIR="$HOME/.cache/ccstatusline"
-_API_CACHE_FILE="$_API_CACHE_DIR/api-usage.json"
-_API_LOCK_FILE="$_API_CACHE_DIR/api-refresh.lock"
-API_ERROR_FILE="$_API_CACHE_DIR/api-error.txt"
-_API_CACHE_TTL=180  # seconds; serve stale + background-refresh beyond this
+# === API Usage Helper ===
+get_api_usage() {
+  CACHE_FILE="$HOME/.cache/ccstatusline-api-usage.json"
+  LOCK_FILE="$HOME/.cache/ccstatusline-api-usage.lock"
+  CACHE_TTL=300  # 5 minutes
+  RATE_LIMIT=60  # 60 seconds between API calls
 
-# Fetch from API and atomically update cache. Writes error to API_ERROR_FILE on failure.
-_api_fetch() {
+  # Check if cache file exists and is fresh
+  if [ -f "$CACHE_FILE" ]; then
+    cache_age=$(($(date +%s) - $(stat -f %m "$CACHE_FILE" 2>/dev/null || echo 0)))
+    if [ "$cache_age" -lt "$CACHE_TTL" ]; then
+      cat "$CACHE_FILE"
+      return 0
+    fi
+  fi
+
+  # Rate limiting: check lock file
+  if [ -f "$LOCK_FILE" ]; then
+    lock_age=$(($(date +%s) - $(stat -f %m "$LOCK_FILE" 2>/dev/null || echo 0)))
+    if [ "$lock_age" -lt "$RATE_LIMIT" ]; then
+      # Return stale cache or fail if rate limited
+      if [ -f "$CACHE_FILE" ]; then cat "$CACHE_FILE"; return 0; fi
+      return 1
+    fi
+  fi
+
+  # Extract OAuth token
   TOKEN=""
   if [ "$(uname)" = "Darwin" ]; then
-    TOKEN=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null \
-      | grep -o '"claudeAiOauth":{"accessToken":"[^"]*"' \
-      | sed 's/.*"accessToken":"\([^"]*\)".*/\1/' 2>/dev/null || true)
+    # macOS: try Keychain first
+    TOKEN=$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null | grep -o '"claudeAiOauth":{"accessToken":"[^"]*"' | sed 's/.*"accessToken":"\([^"]*\)".*/\1/' || echo "")
   fi
   if [ -z "$TOKEN" ] && [ -f "$HOME/.claude/.credentials.json" ]; then
+    # Fallback: read from credentials file
     TOKEN=$(jq -r '.claudeAiOauth.accessToken // empty' "$HOME/.claude/.credentials.json" 2>/dev/null)
   fi
+
   if [ -z "$TOKEN" ]; then
-    echo "no_token: No OAuth token found" > "$API_ERROR_FILE"
+    # No token available
     return 1
   fi
 
-  response=$(curl -s -m 10 \
+  # Create lock file
+  mkdir -p "$(dirname "$LOCK_FILE")"
+  touch "$LOCK_FILE"
+
+  # Call API
+  response=$(curl -s -m 5 \
     -H "Authorization: Bearer $TOKEN" \
     -H "anthropic-beta: oauth-2025-04-20" \
     "https://api.anthropic.com/api/oauth/usage" 2>/dev/null)
-  curl_exit=$?
 
-  if [ "$curl_exit" -ne 0 ]; then
-    echo "network_error: curl failed (exit $curl_exit)" > "$API_ERROR_FILE"
-    return 1
-  fi
-  if [ -z "$response" ]; then
-    echo "empty_response: API returned empty body" > "$API_ERROR_FILE"
-    return 1
-  fi
-
-  api_err=$(echo "$response" | jq -r 'if .error then "\(.error.type): \(.error.message)" else empty end' 2>/dev/null)
-  if [ -n "$api_err" ]; then
-    echo "$api_err" > "$API_ERROR_FILE"
-    return 1
-  fi
-
-  # Atomic write: temp file + mv prevents partial reads
-  tmp=$(mktemp "$_API_CACHE_DIR/api-usage.XXXXXX.json")
-  echo "$response" > "$tmp"
-  mv -f "$tmp" "$_API_CACHE_FILE"
-  rm -f "$API_ERROR_FILE"
-}
-
-# Acquire lock using PID file. Returns 0 if acquired, 1 if another process holds it.
-_api_try_lock() {
-  if [ -f "$_API_LOCK_FILE" ]; then
-    lock_pid=$(cat "$_API_LOCK_FILE" 2>/dev/null)
-    [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null && return 1
-  fi
-  echo $$ > "$_API_LOCK_FILE"
-}
-
-# === API Usage Helper ===
-get_api_usage() {
-  mkdir -p "$_API_CACHE_DIR"
-
-  if [ -f "$_API_CACHE_FILE" ]; then
-    cache_mtime=$(stat -f %m "$_API_CACHE_FILE" 2>/dev/null || stat -c %Y "$_API_CACHE_FILE" 2>/dev/null || echo 0)
-    cache_age=$(( $(date +%s) - cache_mtime ))
-
-    # Always serve cache immediately (fresh or stale)
-    cat "$_API_CACHE_FILE"
-
-    if [ "$cache_age" -ge "$_API_CACHE_TTL" ]; then
-      # Cache stale — refresh in background, don't block statusline
-      if _api_try_lock; then
-        ( _api_fetch; rm -f "$_API_LOCK_FILE" ) &
-      fi
+  if [ $? -eq 0 ] && [ -n "$response" ]; then
+    # Check for API error in response body
+    if echo "$response" | jq -e '.error' >/dev/null 2>&1; then
+      # API returned an error — do not cache, return stale cache or fail
+      [ -f "$CACHE_FILE" ] && cat "$CACHE_FILE" && return 0
+      return 1
     fi
+    # Cache successful response
+    mkdir -p "$(dirname "$CACHE_FILE")"
+    echo "$response" > "$CACHE_FILE"
+    echo "$response"
     return 0
+  else
+    # curl failed — return stale cache or fail
+    [ -f "$CACHE_FILE" ] && cat "$CACHE_FILE" && return 0
+    return 1
   fi
-
-  # No cache yet — first run, fetch synchronously
-  if _api_try_lock; then
-    _api_fetch
-    rm -f "$_API_LOCK_FILE"
-    [ -f "$_API_CACHE_FILE" ] && cat "$_API_CACHE_FILE"
-  fi
-  # Lock held by another process — return empty, it will be ready next render
 }
 
 # === Progress Bar Helper ===
@@ -297,8 +276,23 @@ make_progress_bar() {
   echo "$bar"
 }
 
+# === Line 1 ===
+set --
+set -- "$@" "$BG_MODEL" "$model_content"
+set -- "$@" "$BG_PATH"  "$path_content"
+set -- "$@" "$BG_DIR"   "$dir_content"
+set -- "$@" "$BG_CTX"   "$ctx_content"
+render_pl_line "$@"
+
+# === Line 2: token detail + total + cost ===
+line2=""
+[ -n "$tok_content"   ] && line2="${line2} ${tok_content}\033[0m"
+[ -n "$total_content" ] && line2="${line2}  \033[38;5;80m${total_content}\033[0m"
+[ -n "$cost_content"  ] && line2="${line2}   \033[38;5;136m${cost_content}\033[0m"
+[ -n "$line2" ] && printf '%b\n' "$line2"
+
 # === Line 3: session/weekly usage from Anthropic API ===
-api_usage=$(get_api_usage)
+api_usage=$(get_api_usage); api_exit=$?
 api_sess_pct=""
 api_sess_reset=""
 api_week_pct=""
@@ -336,12 +330,7 @@ if [ -n "$api_sess_pct" ] || [ -n "$api_week_pct" ]; then
   fi
 
   [ -n "$line3" ] && printf '%b\n' "$line3"
-else
-  # Fallback: API data not available — show actual error message
-  if [ -f "$API_ERROR_FILE" ]; then
-    api_err=$(cat "$API_ERROR_FILE")
-    printf '%b\n' " \033[38;5;203m[!] API error: ${api_err}\033[0m"
-  else
-    printf '%b\n' " \033[38;5;203m[!] Cannot get usage data from API\033[0m"
-  fi
+elif [ "$api_exit" -ne 0 ]; then
+  # API call failed — show error indicator
+  printf '%b\n' " \033[38;5;203m[!] usage data unavailable\033[0m"
 fi
