@@ -26,7 +26,7 @@ git clone https://github.com/huybq95/claude-statusline.git ~/claude-statusline
 
 ### Bước 2: Tạo symlink
 ```bash
-ln -sf ~/claude-statusline/statusline-command.sh ~/.claude/~/.claude/statusline-command.sh
+ln -sf ~/claude-statusline/statusline-command.sh ~/.claude/statusline-command.sh
 chmod +x ~/claude-statusline/statusline-command.sh
 ```
 
