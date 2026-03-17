@@ -1,4 +1,4 @@
-<img width="614" height="64" alt="Screenshot 2026-03-09 at 11 34 13" src="https://github.com/user-attachments/assets/8c3c06f0-5827-4fcc-adb3-adcb09d238e2" />
+<img width="1793" height="83" alt="Screenshot 2026-03-17 at 14 25 31" src="https://github.com/user-attachments/assets/c0d9aa3b-085a-4a6d-8831-ef6c440856ad" />
 
 # Hướng Dẫn Cài Đặt Statusline
 
