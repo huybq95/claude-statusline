@@ -26,9 +26,8 @@ git clone https://github.com/huybq95/claude-statusline.git ~/claude-statusline
 
 ### Bước 2: Tạo symlink
 ```bash
-mkdir -p ~/.claude
-ln -sf ~/claude-statusline/statusline.sh ~/.claude/statusline.sh
-chmod +x ~/claude-statusline/statusline.sh
+ln -sf ~/claude-statusline/statusline-command.sh ~/.claude/~/.claude/statusline-command.sh
+chmod +x ~/claude-statusline/statusline-command.sh
 ```
 
 **Lợi ích:** Khi bạn cập nhật repo và chạy `git pull`, statusline sẽ tự động cập nhật.
@@ -39,7 +38,7 @@ chmod +x ~/claude-statusline/statusline.sh
 
 ```
 ~/.claude/
-└── statusline.sh    # File statusline (hoặc symlink trỏ đến repo)
+└── statusline-command.sh    # File statusline (hoặc symlink trỏ đến repo)
 ```
 
 **Vị trí bắt buộc:** `~/.claude/statusline.sh`
@@ -50,10 +49,10 @@ chmod +x ~/claude-statusline/statusline.sh
 
 ```bash
 # Kiểm tra file có tồn tại không
-ls -la ~/.claude/statusline.sh
+ls -la ~/.claude/statusline-command.sh
 
 # Nếu dùng symlink, sẽ thấy:
-# ~/.claude/statusline.sh -> /Users/apple/claude-statusline/statusline.sh
+# ~/.claude/statusline-command.sh -> /Users/<user>/claude-statusline/statusline-command.sh
 ```
 
 ---
@@ -62,7 +61,7 @@ ls -la ~/.claude/statusline.sh
 
 ### Nếu dùng Cách 1 (tải trực tiếp):
 ```bash
-curl -o ~/.claude/statusline.sh https://raw.githubusercontent.com/huybq95/claude-statusline/main/statusline.sh
+curl -o ~/.claude/statusline-command.sh https://raw.githubusercontent.com/huybq95/claude-statusline/main/statusline-command.sh
 ```
 
 ### Nếu dùng Cách 2 (symlink):
@@ -81,4 +80,4 @@ Chỉ cần lặp lại Bước 1 và 2 của Cách 2 trên máy mới.
 
 ## Không Cần Cấu Hình Thêm
 
-Claude Code tự động tìm và chạy file `~/.claude/statusline.sh`. Không cần config gì thêm.
+Claude Code tự động tìm và chạy file `~/.claude/statusline-command.sh`. Không cần config gì thêm.
