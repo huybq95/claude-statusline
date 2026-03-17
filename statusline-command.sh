@@ -305,6 +305,102 @@ line2=""
 [ -n "$cost_content"  ] && line2="${line2}   \033[38;5;136m${cost_content}\033[0m"
 [ -n "$line2" ] && printf '%b\n' "$line2"
 
+# === Promotion x2 checker (March 13–27 2026, off-peak ET) ===
+# ET = EDT (UTC-4) since clocks spring forward Mar 8 2026.
+# Peak hours: Mon–Fri 8AM–2PM ET = 12:00–18:00 UTC.
+promo_label=""
+now_epoch=$(date +%s)
+# Convert current epoch to ET (UTC-4)
+et_epoch=$((now_epoch - 4*3600))
+et_hour=$(date -u -r "$et_epoch" "+%H" 2>/dev/null || date -u -d "@$et_epoch" "+%H" 2>/dev/null)
+et_dow=$(date  -u -r "$et_epoch" "+%u" 2>/dev/null || date -u -d "@$et_epoch" "+%u" 2>/dev/null)
+# Date bounds: promo runs 2026-03-13 00:00 ET to 2026-03-27 23:59 ET
+promo_start=$(date -u -j -f "%Y-%m-%d %H:%M:%S" "2026-03-13 00:00:00" "+%s" 2>/dev/null || date -u -d "2026-03-13T00:00:00-04:00" "+%s" 2>/dev/null)
+promo_end=$(date   -u -j -f "%Y-%m-%d %H:%M:%S" "2026-03-27 23:59:59" "+%s" 2>/dev/null || date -u -d "2026-03-27T23:59:59-04:00" "+%s" 2>/dev/null)
+promo_in_date=0
+if [ -n "$promo_start" ] && [ -n "$promo_end" ]; then
+  if [ "$now_epoch" -ge "$promo_start" ] && [ "$now_epoch" -le "$promo_end" ]; then
+    promo_in_date=1
+  fi
+fi
+if [ "$promo_in_date" -eq 1 ] && [ -n "$et_hour" ] && [ -n "$et_dow" ]; then
+  # Weekday = 1..5, peak = 08:00..13:59 ET (hours 8–13 inclusive)
+  is_weekday=0; is_peak=0
+  [ "$et_dow" -ge 1 ] && [ "$et_dow" -le 5 ] && is_weekday=1
+  [ "$et_hour" -ge 8 ] && [ "$et_hour" -lt 14 ] && is_peak=1
+
+  # Helper: given a UTC epoch, convert to local HH:MM
+  # Uses `date` without -u so it applies the local timezone.
+  utc_to_local_hhmm() {
+    epoch="$1"
+    date -r "$epoch" "+%H:%M" 2>/dev/null || date -d "@$epoch" "+%H:%M" 2>/dev/null
+  }
+
+  if [ "$is_weekday" -eq 1 ] && [ "$is_peak" -eq 1 ]; then
+    # Currently peak — x2 is OFF.
+    # x2 resumes when peak ends: 2PM ET = 18:00 UTC today.
+    # Compute epoch for 18:00 UTC today.
+    today_utc_date=$(date -u -r "$now_epoch" "+%Y-%m-%d" 2>/dev/null || date -u -d "@$now_epoch" "+%Y-%m-%d" 2>/dev/null)
+    resume_utc_epoch=$(date -u -j -f "%Y-%m-%d %H:%M:%S" "${today_utc_date} 18:00:00" "+%s" 2>/dev/null || date -u -d "${today_utc_date}T18:00:00Z" "+%s" 2>/dev/null)
+    resume_local=$(utc_to_local_hhmm "$resume_utc_epoch")
+    if [ -n "$resume_local" ]; then
+      promo_label=" \033[38;5;214mx2 resumes at ${resume_local}\033[0m"
+    else
+      promo_label=" \033[38;5;214mx2 promo: OFF (peak hrs)\033[0m"
+    fi
+  else
+    # Currently off-peak — x2 is ACTIVE.
+    # x2 ends when peak starts: 8AM ET = 12:00 UTC.
+    # If it's already past 18:00 UTC today (i.e., after peak) → next peak is tomorrow at 12:00 UTC.
+    # If it's before 12:00 UTC today → peak starts at 12:00 UTC today.
+    # Weekend: next peak is the coming Monday 12:00 UTC.
+    today_utc_date=$(date -u -r "$now_epoch" "+%Y-%m-%d" 2>/dev/null || date -u -d "@$now_epoch" "+%Y-%m-%d" 2>/dev/null)
+    today_peak_start_epoch=$(date -u -j -f "%Y-%m-%d %H:%M:%S" "${today_utc_date} 12:00:00" "+%s" 2>/dev/null || date -u -d "${today_utc_date}T12:00:00Z" "+%s" 2>/dev/null)
+    # Determine next peak start UTC epoch
+    next_peak_epoch=""
+    if [ "$is_weekday" -eq 1 ]; then
+      # Weekday but off-peak: either before 12:00 UTC (pre-peak) or after 18:00 UTC (post-peak)
+      if [ "$now_epoch" -lt "$today_peak_start_epoch" ]; then
+        # Before peak today → peak starts today at 12:00 UTC
+        next_peak_epoch="$today_peak_start_epoch"
+      else
+        # After peak today → next peak is tomorrow (or Monday if Friday)
+        # et_dow: 1=Mon … 5=Fri. If Friday (5), next peak is Monday (+3 days).
+        days_ahead=1
+        [ "$et_dow" -eq 5 ] && days_ahead=3
+        next_peak_epoch=$((today_peak_start_epoch + days_ahead * 86400))
+      fi
+    else
+      # Weekend: find next Monday 12:00 UTC
+      # et_dow: 6=Sat → 2 days, 7=Sun → 1 day
+      if [ "$et_dow" -eq 6 ]; then days_ahead=2; else days_ahead=1; fi
+      next_peak_epoch=$((today_peak_start_epoch + days_ahead * 86400))
+    fi
+    until_local=$(utc_to_local_hhmm "$next_peak_epoch")
+    if [ -n "$until_local" ]; then
+      promo_label=" \033[38;5;82m x2 ACTIVE until ${until_local}\033[0m"
+    else
+      promo_label=" \033[38;5;82m x2 ACTIVE now!\033[38;5;242m (off-peak)\033[0m"
+    fi
+  fi
+fi
+
+# === Terminal width detection ===
+# Script runs with stdin/stdout as pipes (not a tty), so tput cols and $COLUMNS
+# may return stale values after a SIGWINCH resize event.
+# Fix: query the live terminal size via /dev/tty using `stty size`, which issues
+# a TIOCGWINSZ ioctl directly against the controlling terminal regardless of
+# whether this process's stdio is a tty.
+term_width=$(stty size </dev/tty 2>/dev/null | awk '{print $2}')
+# Fallback chain: tput against /dev/tty, then plain tput, then $COLUMNS, then 0
+if [ -z "$term_width" ] || [ "$term_width" -eq 0 ] 2>/dev/null; then
+  term_width=$(TERM="${TERM:-xterm-256color}" tput cols </dev/tty 2>/dev/null \
+               || tput cols 2>/dev/null \
+               || echo "${COLUMNS:-0}")
+fi
+# Threshold below which compact mode is used for line 3.
+COMPACT_WIDTH=100
+
 # === Line 3: session/weekly usage from Anthropic API ===
 api_usage=$(get_api_usage); api_exit=$?
 api_sess_pct=""
@@ -320,31 +416,63 @@ if [ -n "$api_usage" ]; then
 fi
 
 if [ -n "$api_sess_pct" ] || [ -n "$api_week_pct" ]; then
-  # Display session and weekly usage with progress bars
   line3=""
 
-  if [ -n "$api_sess_pct" ]; then
-    sess_int=$(printf '%.0f' "$api_sess_pct")
-    if [ "$sess_int" -ge 80 ]; then sess_c=203; elif [ "$sess_int" -ge 50 ]; then sess_c=215; else sess_c=114; fi
-    sess_bar=$(make_progress_bar "$api_sess_pct" 15)
-    sess_reset_str=$(format_reset_in "$api_sess_reset")
-    line3="${line3} \033[38;5;250m${ICO_SESSION} Session: \033[38;5;245m[\033[38;5;${sess_c}m${sess_bar}\033[38;5;245m] \033[38;5;${sess_c}m${api_sess_pct}%"
-    [ -n "$sess_reset_str" ] && line3="${line3} \033[38;5;242m↻${sess_reset_str}"
-    line3="${line3}\033[0m"
-  fi
+  if [ "$term_width" -gt 0 ] && [ "$term_width" -lt "$COMPACT_WIDTH" ]; then
+    # --- Compact mode: no progress bars, abbreviated labels ---
+    if [ -n "$api_sess_pct" ]; then
+      sess_int=$(printf '%.0f' "$api_sess_pct")
+      if [ "$sess_int" -ge 80 ]; then sess_c=203; elif [ "$sess_int" -ge 50 ]; then sess_c=215; else sess_c=114; fi
+      sess_reset_str=$(format_reset_in "$api_sess_reset")
+      line3="${line3} \033[38;5;250m${ICO_SESSION}5h:\033[38;5;${sess_c}m${api_sess_pct}%"
+      [ -n "$sess_reset_str" ] && line3="${line3}\033[38;5;242m↻${sess_reset_str}"
+      line3="${line3}\033[0m"
+    fi
 
-  if [ -n "$api_week_pct" ]; then
-    week_int=$(printf '%.0f' "$api_week_pct")
-    if [ "$week_int" -ge 80 ]; then week_c=203; elif [ "$week_int" -ge 50 ]; then week_c=215; else week_c=114; fi
-    week_bar=$(make_progress_bar "$api_week_pct" 15)
-    week_reset_str=$(format_reset_in "$api_week_reset")
-    line3="${line3}  \033[38;5;250m${ICO_WEEKLY} Weekly: \033[38;5;245m[\033[38;5;${week_c}m${week_bar}\033[38;5;245m] \033[38;5;${week_c}m${api_week_pct}%"
-    [ -n "$week_reset_str" ] && line3="${line3} \033[38;5;242m↻${week_reset_str}"
-    line3="${line3}\033[0m"
+    if [ -n "$api_week_pct" ]; then
+      week_int=$(printf '%.0f' "$api_week_pct")
+      if [ "$week_int" -ge 80 ]; then week_c=203; elif [ "$week_int" -ge 50 ]; then week_c=215; else week_c=114; fi
+      week_reset_str=$(format_reset_in "$api_week_reset")
+      line3="${line3}  \033[38;5;250m${ICO_WEEKLY}7d:\033[38;5;${week_c}m${api_week_pct}%"
+      [ -n "$week_reset_str" ] && line3="${line3}\033[38;5;242m↻${week_reset_str}"
+      line3="${line3}\033[0m"
+    fi
+
+    [ -n "$promo_label" ] && line3="${line3}  ${promo_label}"
+  else
+    # --- Full mode: progress bars + labels ---
+    if [ -n "$api_sess_pct" ]; then
+      sess_int=$(printf '%.0f' "$api_sess_pct")
+      if [ "$sess_int" -ge 80 ]; then sess_c=203; elif [ "$sess_int" -ge 50 ]; then sess_c=215; else sess_c=114; fi
+      sess_bar=$(make_progress_bar "$api_sess_pct" 15)
+      sess_reset_str=$(format_reset_in "$api_sess_reset")
+      line3="${line3} \033[38;5;250m${ICO_SESSION} Session: \033[38;5;245m[\033[38;5;${sess_c}m${sess_bar}\033[38;5;245m] \033[38;5;${sess_c}m${api_sess_pct}%"
+      [ -n "$sess_reset_str" ] && line3="${line3} \033[38;5;242m↻${sess_reset_str}"
+      line3="${line3}\033[0m"
+    fi
+
+    if [ -n "$api_week_pct" ]; then
+      week_int=$(printf '%.0f' "$api_week_pct")
+      if [ "$week_int" -ge 80 ]; then week_c=203; elif [ "$week_int" -ge 50 ]; then week_c=215; else week_c=114; fi
+      week_bar=$(make_progress_bar "$api_week_pct" 15)
+      week_reset_str=$(format_reset_in "$api_week_reset")
+      line3="${line3}  \033[38;5;250m${ICO_WEEKLY} Weekly: \033[38;5;245m[\033[38;5;${week_c}m${week_bar}\033[38;5;245m] \033[38;5;${week_c}m${api_week_pct}%"
+      [ -n "$week_reset_str" ] && line3="${line3} \033[38;5;242m↻${week_reset_str}"
+      line3="${line3}\033[0m"
+    fi
+
+    [ -n "$promo_label" ] && line3="${line3}  ${promo_label}"
   fi
 
   [ -n "$line3" ] && printf '%b\n' "$line3"
 elif [ "$api_exit" -ne 0 ]; then
   # API call failed — show error indicator
-  printf '%b\n' " \033[38;5;203m[!] usage data unavailable\033[0m"
+  line3_err=" \033[38;5;203m[!] usage data unavailable\033[0m"
+  [ -n "$promo_label" ] && line3_err="${line3_err}  ${promo_label}"
+  printf '%b\n' "$line3_err"
+fi
+
+# Show promo label even if no API usage data at all
+if [ -z "$api_sess_pct" ] && [ -z "$api_week_pct" ] && [ "$api_exit" -eq 0 ] && [ -n "$promo_label" ]; then
+  printf '%b\n' "${promo_label}"
 fi
